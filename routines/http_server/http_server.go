@@ -201,7 +201,12 @@ func (s *HTTPServer) handlePost(w http.ResponseWriter, r *http.Request, collecti
 	for _, doc := range docs {
 		result = append(result, sanitizeDocument(doc))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": result, "count": len(result)})
+	totalCount, err := countDocuments(collection)
+	if err != nil {
+		log.Printf("count_documents_failed database=%s collection=%s error=%v", collection.Database().Name(), collection.Name(), err)
+		totalCount = int64(len(result))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": result, "count": totalCount})
 }
 
 func (s *HTTPServer) handlePut(w http.ResponseWriter, r *http.Request, collection *mongo.Collection, documentID string) {
@@ -242,7 +247,12 @@ func (s *HTTPServer) handlePut(w http.ResponseWriter, r *http.Request, collectio
 		for _, id := range inserted.InsertedIDs {
 			response = append(response, map[string]any{"id": normalizeInsertedID(id)})
 		}
-		writeJSON(w, http.StatusCreated, map[string]any{"data": response, "count": len(response)})
+		totalCount, err := countDocuments(collection)
+		if err != nil {
+			log.Printf("count_documents_failed database=%s collection=%s error=%v", collection.Database().Name(), collection.Name(), err)
+			totalCount = int64(len(response))
+		}
+		writeJSON(w, http.StatusCreated, map[string]any{"data": response, "count": totalCount})
 		return
 	}
 
@@ -656,6 +666,15 @@ func sanitizeDocument(input any) map[string]any {
 		delete(output, "_id")
 	}
 	return output
+}
+
+func countDocuments(collection *mongo.Collection) (int64, error) {
+	if collection == nil {
+		return 0, fmt.Errorf("collection is required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return collection.CountDocuments(ctx, bson.M{})
 }
 
 func toBSONMap(value any) bson.M {
