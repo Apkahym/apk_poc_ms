@@ -7,11 +7,12 @@ import (
 	"syscall"
 
 	"apk_poc_ms/routines"
+	httpServer "apk_poc_ms/routines/http_server"
 )
 
 func main() {
 	registry := map[string]routines.Routine{
-		"http_server": routines.NewHTTPServer(),
+		"http_server": httpServer.NewHTTPServer(),
 	}
 
 	for name, routine := range registry {

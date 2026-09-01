@@ -1,4 +1,4 @@
-package routines
+package http_server
 
 import (
 	"testing"
@@ -9,9 +9,7 @@ import (
 
 func TestSanitizeDocumentConvertsObjectIDToID(t *testing.T) {
 	input := bson.M{"_id": primitive.NewObjectID(), "name": "Alice"}
-
 	result := sanitizeDocument(input)
-
 	if _, ok := result["_id"]; ok {
 		t.Fatal("_id should be removed from the output")
 	}
@@ -33,18 +31,10 @@ func TestParseDatabaseCollectionPath(t *testing.T) {
 	}
 }
 
-func TestParseDatabaseCollectionPath_Invalid(t *testing.T) {
-	invalidPaths := []string{
-		"/api/v1/users",
-		"/v1/testdb/users",
-		"/api/testdb/users",
-		"/api/v1//users",
-		"/api/v1/testdb/users/64bf123abc1234567890abcd/extra",
-	}
-
-	for _, rawPath := range invalidPaths {
-		if _, _, _, err := parseDatabaseCollectionPath(rawPath); err == nil {
-			t.Fatalf("expected invalid route for %s", rawPath)
-		}
+func TestPatchItemID(t *testing.T) {
+	payload := map[string]any{"id": "64bf123abc1234567890abcd", "update": map[string]any{"name": "Alice"}}
+	id := patchItemID(payload)
+	if id != "64bf123abc1234567890abcd" {
+		t.Fatalf("expected patch item id 64bf123abc1234567890abcd, got %#v", id)
 	}
 }

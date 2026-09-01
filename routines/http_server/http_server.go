@@ -1,4 +1,4 @@
-package routines
+package http_server
 
 import (
 	"context"
@@ -14,7 +14,9 @@ import (
 	"strings"
 	"time"
 
-	mongoDB "apk_poc_ms/database"
+	"apk_poc_ms/database"
+	"apk_poc_ms/routines"
+	"apk_poc_ms/routines/http_server/middleware"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -45,9 +47,12 @@ func (s *HTTPServer) Start() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/", s.handleAPI)
 
+	auth := middleware.NewAPIKeyAuth(database.GetClient())
+	handler := middleware.Apply(mux, auth.Middleware)
+
 	s.server = &http.Server{
 		Addr:              s.addr,
-		Handler:           mux,
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
@@ -59,7 +64,6 @@ func (s *HTTPServer) Start() error {
 			log.Printf("http server error: %v", err)
 		}
 	}()
-
 	return nil
 }
 
@@ -67,14 +71,11 @@ func (s *HTTPServer) Stop() error {
 	if s.server == nil {
 		return nil
 	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-
 	if err := s.server.Shutdown(ctx); err != nil {
 		return err
 	}
-
 	s.server = nil
 	return nil
 }
@@ -114,13 +115,12 @@ func (s *HTTPServer) handleAPI(w http.ResponseWriter, r *http.Request) {
 	if documentID == "" {
 		documentID = strings.TrimSpace(r.URL.Query().Get("id"))
 	}
-
-	if mongoDB.GetClient() == nil {
+	if database.GetClient() == nil {
 		writeAPIError(w, http.StatusServiceUnavailable, "database unavailable", "USR503", nil)
 		return
 	}
 
-	collection := mongoDB.GetClient().Database(databaseName).Collection(collectionName)
+	collection := database.GetClient().Database(databaseName).Collection(collectionName)
 
 	switch r.Method {
 	case http.MethodGet:
@@ -143,13 +143,11 @@ func (s *HTTPServer) handleGet(w http.ResponseWriter, r *http.Request, collectio
 		writeAPIError(w, http.StatusBadRequest, "record id is required", "USR400", nil)
 		return
 	}
-
 	objectID, err := primitive.ObjectIDFromHex(documentID)
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, "invalid record id", "USR400", err)
 		return
 	}
-
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
@@ -162,20 +160,15 @@ func (s *HTTPServer) handleGet(w http.ResponseWriter, r *http.Request, collectio
 		writeAPIError(w, http.StatusInternalServerError, "fail to read record", "USR500", err)
 		return
 	}
-
 	writeJSON(w, http.StatusOK, sanitizeDocument(doc))
 }
 
 func (s *HTTPServer) handlePost(w http.ResponseWriter, r *http.Request, collection *mongo.Collection) {
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
-
 	payload, err := decodeRequestBody(r)
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, "fail to read body", "USR400", err)
 		return
 	}
-
 	filter := bson.M{}
 	if payload == nil {
 		filter = bson.M{}
@@ -189,6 +182,8 @@ func (s *HTTPServer) handlePost(w http.ResponseWriter, r *http.Request, collecti
 		filter = toBSONMap(batch[0])
 	}
 
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
 	cursor, err := collection.Find(ctx, filter)
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "fail to query records", "USR500", err)
@@ -202,49 +197,50 @@ func (s *HTTPServer) handlePost(w http.ResponseWriter, r *http.Request, collecti
 		return
 	}
 
-	response := make([]map[string]any, 0, len(docs))
+	result := make([]map[string]any, 0, len(docs))
 	for _, doc := range docs {
-		response = append(response, sanitizeDocument(doc))
+		result = append(result, sanitizeDocument(doc))
 	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"data": response, "count": len(response)})
+	writeJSON(w, http.StatusOK, map[string]any{"data": result, "count": len(result)})
 }
 
 func (s *HTTPServer) handlePut(w http.ResponseWriter, r *http.Request, collection *mongo.Collection, documentID string) {
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
-
 	payload, err := decodeRequestBody(r)
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, "fail to read body", "USR400", err)
 		return
 	}
-
 	if payload == nil {
 		writeAPIError(w, http.StatusBadRequest, "document body is required", "USR400", nil)
 		return
 	}
 
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
 	if batch, ok := payload.([]any); ok {
-		items := make([]map[string]any, 0, len(batch))
+		items := make([]any, 0, len(batch))
 		for _, item := range batch {
 			doc, ok := item.(map[string]any)
 			if !ok {
 				writeAPIError(w, http.StatusBadRequest, "batch items must be objects", "USR400", nil)
 				return
 			}
+			if documentID != "" {
+				if _, exists := doc["_id"]; !exists {
+					doc["_id"] = documentID
+				}
+			}
 			items = append(items, doc)
 		}
-
-		insertedIDs, err := collection.InsertMany(ctx, toDocuments(items))
+		inserted, err := collection.InsertMany(ctx, items)
 		if err != nil {
 			writeAPIError(w, http.StatusInternalServerError, "fail to create records", "USR500", err)
 			return
 		}
-
-		response := make([]map[string]any, 0, len(insertedIDs.InsertedIDs))
-		for _, insertedID := range insertedIDs.InsertedIDs {
-			response = append(response, map[string]any{"id": normalizeInsertedID(insertedID)})
+		response := make([]map[string]any, 0, len(inserted.InsertedIDs))
+		for _, id := range inserted.InsertedIDs {
+			response = append(response, map[string]any{"id": normalizeInsertedID(id)})
 		}
 		writeJSON(w, http.StatusCreated, map[string]any{"data": response, "count": len(response)})
 		return
@@ -255,9 +251,8 @@ func (s *HTTPServer) handlePut(w http.ResponseWriter, r *http.Request, collectio
 		writeAPIError(w, http.StatusBadRequest, "document body must be an object", "USR400", nil)
 		return
 	}
-
 	if documentID != "" {
-		if _, ok := document["_id"]; !ok {
+		if _, exists := document["_id"]; !exists {
 			document["_id"] = documentID
 		}
 	}
@@ -283,14 +278,10 @@ func (s *HTTPServer) handlePut(w http.ResponseWriter, r *http.Request, collectio
 	response := sanitizeDocument(document)
 	response["id"] = normalizeInsertedID(result.InsertedID)
 	delete(response, "_id")
-
 	writeJSON(w, http.StatusCreated, response)
 }
 
 func (s *HTTPServer) handlePatch(w http.ResponseWriter, r *http.Request, collection *mongo.Collection, documentID string) {
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
-
 	payload, err := decodeRequestBody(r)
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, "fail to read body", "USR400", err)
@@ -301,22 +292,37 @@ func (s *HTTPServer) handlePatch(w http.ResponseWriter, r *http.Request, collect
 		return
 	}
 
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
 	if batch, ok := payload.([]any); ok {
 		results := make([]map[string]any, 0, len(batch))
+		errorsList := make([]map[string]any, 0)
 		for _, item := range batch {
 			entry, ok := item.(map[string]any)
 			if !ok {
-				writeAPIError(w, http.StatusBadRequest, "batch items must be objects", "USR400", nil)
-				return
+				errorsList = append(errorsList, map[string]any{"id": nil, "error": "batch items must be objects"})
+				continue
 			}
 			result, err := applyPatchOperation(ctx, collection, documentID, entry)
 			if err != nil {
-				writeAPIError(w, getStatusForPatchError(err), getClientMessageForPatch(err), getCodeForPatchError(err), err)
-				return
+				errorsList = append(errorsList, map[string]any{"id": patchItemID(entry), "error": normalizePatchError(err)})
+				continue
 			}
 			results = append(results, result)
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"data": results, "count": len(results)})
+		response := map[string]any{"partial_success": len(results)}
+		if len(errorsList) > 0 {
+			response["errors"] = errorsList
+		}
+		if len(results) > 0 {
+			response["data"] = results
+		}
+		if len(errorsList) > 0 {
+			writeJSON(w, http.StatusOK, response)
+			return
+		}
+		writeJSON(w, http.StatusOK, response)
 		return
 	}
 
@@ -325,7 +331,6 @@ func (s *HTTPServer) handlePatch(w http.ResponseWriter, r *http.Request, collect
 		writeAPIError(w, http.StatusBadRequest, "patch body must be an object", "USR400", nil)
 		return
 	}
-
 	result, err := applyPatchOperation(ctx, collection, documentID, entry)
 	if err != nil {
 		writeAPIError(w, getStatusForPatchError(err), getClientMessageForPatch(err), getCodeForPatchError(err), err)
@@ -335,15 +340,11 @@ func (s *HTTPServer) handlePatch(w http.ResponseWriter, r *http.Request, collect
 }
 
 func (s *HTTPServer) handleDelete(w http.ResponseWriter, r *http.Request, collection *mongo.Collection, documentID string) {
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
-
 	payload, err := decodeRequestBody(r)
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, "fail to read body", "USR400", err)
 		return
 	}
-
 	if documentID != "" {
 		documentID = strings.TrimSpace(documentID)
 	}
@@ -353,7 +354,7 @@ func (s *HTTPServer) handleDelete(w http.ResponseWriter, r *http.Request, collec
 			writeAPIError(w, http.StatusBadRequest, "record id or filter is required", "USR400", nil)
 			return
 		}
-		result, err := collection.DeleteOne(ctx, bson.M{"_id": normalizeObjectID(documentID)})
+		result, err := collection.DeleteOne(ctxWithTimeout(r), bson.M{"_id": normalizeObjectID(documentID)})
 		if err != nil {
 			writeAPIError(w, http.StatusInternalServerError, "fail to delete record", "USR500", err)
 			return
@@ -387,7 +388,7 @@ func (s *HTTPServer) handleDelete(w http.ResponseWriter, r *http.Request, collec
 		for _, id := range ids {
 			mongoIDs = append(mongoIDs, normalizeObjectID(id))
 		}
-		result, err := collection.DeleteMany(ctx, bson.M{"_id": bson.M{"$in": mongoIDs}})
+		result, err := collection.DeleteMany(ctxWithTimeout(r), bson.M{"_id": bson.M{"$in": mongoIDs}})
 		if err != nil {
 			writeAPIError(w, http.StatusInternalServerError, "fail to delete records", "USR500", err)
 			return
@@ -403,7 +404,7 @@ func (s *HTTPServer) handleDelete(w http.ResponseWriter, r *http.Request, collec
 	}
 
 	if id, hasID := extractID(entry); hasID {
-		result, err := collection.DeleteOne(ctx, bson.M{"_id": normalizeObjectID(id)})
+		result, err := collection.DeleteOne(ctxWithTimeout(r), bson.M{"_id": normalizeObjectID(id)})
 		if err != nil {
 			writeAPIError(w, http.StatusInternalServerError, "fail to delete record", "USR500", err)
 			return
@@ -413,7 +414,7 @@ func (s *HTTPServer) handleDelete(w http.ResponseWriter, r *http.Request, collec
 	}
 	if rawFilter, ok := entry["filter"]; ok {
 		filter := toBSONMap(rawFilter)
-		result, err := collection.DeleteMany(ctx, filter)
+		result, err := collection.DeleteMany(ctxWithTimeout(r), filter)
 		if err != nil {
 			writeAPIError(w, http.StatusInternalServerError, "fail to delete records", "USR500", err)
 			return
@@ -423,7 +424,7 @@ func (s *HTTPServer) handleDelete(w http.ResponseWriter, r *http.Request, collec
 	}
 
 	filter := toBSONMap(entry)
-	result, err := collection.DeleteMany(ctx, filter)
+	result, err := collection.DeleteMany(ctxWithTimeout(r), filter)
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "fail to delete records", "USR500", err)
 		return
@@ -431,89 +432,10 @@ func (s *HTTPServer) handleDelete(w http.ResponseWriter, r *http.Request, collec
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": result.DeletedCount, "count": result.DeletedCount})
 }
 
-func decodeRequestBody(r *http.Request) (any, error) {
-	if r.Body == nil {
-		return nil, nil
-	}
-	defer r.Body.Close()
-
-	var payload any
-	decoder := json.NewDecoder(r.Body)
-	if err := decoder.Decode(&payload); err != nil {
-		if errors.Is(err, io.EOF) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	return payload, nil
-}
-
-func writeAPIError(w http.ResponseWriter, status int, message, code string, err error) {
-	file, line := callerInfo()
-	if err == nil {
-		log.Printf("api_error message=%q code=%s file=%s:%d", message, code, file, line)
-	} else {
-		log.Printf("api_error message=%q code=%s file=%s:%d original=%v", message, code, file, line, err)
-	}
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]any{"error": message, "code": code})
-}
-
-func callerInfo() (string, int) {
-	_, file, line, ok := runtime.Caller(2)
-	if !ok {
-		return "unknown", 0
-	}
-	return filepath.Base(file), line
-}
-
-func normalizeInsertedID(value any) string {
-	switch id := value.(type) {
-	case primitive.ObjectID:
-		return id.Hex()
-	case string:
-		return id
-	case []byte:
-		return string(id)
-	default:
-		if id == nil {
-			return ""
-		}
-		return fmt.Sprintf("%v", id)
-	}
-}
-
-func normalizeObjectID(value string) any {
-	trimmed := strings.TrimSpace(value)
-	if trimmed == "" {
-		return trimmed
-	}
-	if oid, err := primitive.ObjectIDFromHex(trimmed); err == nil {
-		return oid
-	}
-	return trimmed
-}
-
-func extractID(value map[string]any) (string, bool) {
-	if value == nil {
-		return "", false
-	}
-	for _, key := range []string{"id", "_id"} {
-		if raw, ok := value[key]; ok {
-			if id := normalizeInsertedID(raw); id != "" {
-				return id, true
-			}
-		}
-	}
-	return "", false
-}
-
-func toDocuments(items []map[string]any) []any {
-	result := make([]any, 0, len(items))
-	for _, item := range items {
-		result = append(result, item)
-	}
-	return result
+func ctxWithTimeout(r *http.Request) context.Context {
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	_ = cancel
+	return ctx
 }
 
 func applyPatchOperation(ctx context.Context, collection *mongo.Collection, documentID string, payload map[string]any) (map[string]any, error) {
@@ -561,6 +483,36 @@ func applyPatchOperation(ctx context.Context, collection *mongo.Collection, docu
 	return sanitizeDocument(doc), nil
 }
 
+func patchItemID(payload map[string]any) any {
+	if id, ok := extractID(payload); ok {
+		return id
+	}
+	if rawFilter, ok := payload["filter"]; ok {
+		if filterMap, ok := rawFilter.(map[string]any); ok {
+			if id, ok := extractID(filterMap); ok {
+				return id
+			}
+		}
+	}
+	return nil
+}
+
+func normalizePatchError(err error) string {
+	if err == nil {
+		return "request failed"
+	}
+	if strings.Contains(err.Error(), "record not found") {
+		return "record not found"
+	}
+	if strings.Contains(err.Error(), "required") {
+		return "request body is incomplete"
+	}
+	if strings.Contains(err.Error(), "invalid") {
+		return "invalid record id"
+	}
+	return "fail to update record"
+}
+
 func getStatusForPatchError(err error) int {
 	if err == nil {
 		return http.StatusOK
@@ -603,6 +555,26 @@ func getCodeForPatchError(err error) string {
 	return "USR500"
 }
 
+func writeAPIError(w http.ResponseWriter, status int, message, code string, err error) {
+	file, line := callerInfo()
+	if err == nil {
+		log.Printf("api_error message=%q code=%s file=%s:%d", message, code, file, line)
+	} else {
+		log.Printf("api_error message=%q code=%s file=%s:%d original=%v", message, code, file, line, err)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{"error": message, "code": code})
+}
+
+func callerInfo() (string, int) {
+	_, file, line, ok := runtime.Caller(2)
+	if !ok {
+		return "unknown", 0
+	}
+	return filepath.Base(file), line
+}
+
 func parseDatabaseCollectionPath(rawPath string) (string, string, string, error) {
 	parts := strings.Split(strings.Trim(rawPath, "/"), "/")
 	if len(parts) != 4 && len(parts) != 5 {
@@ -618,14 +590,12 @@ func parseDatabaseCollectionPath(rawPath string) (string, string, string, error)
 	if len(parts) > 4 {
 		documentID = parts[4]
 	}
-
 	if databaseName == "" || collectionName == "" {
 		return "", "", "", fmt.Errorf("database and collection are required")
 	}
 	if !isValidMongoIdentifier(databaseName) || !isValidMongoIdentifier(collectionName) {
 		return "", "", "", fmt.Errorf("database and collection names contain invalid characters")
 	}
-
 	return databaseName, collectionName, documentID, nil
 }
 
@@ -633,7 +603,6 @@ func isValidMongoIdentifier(value string) bool {
 	if value == "" {
 		return false
 	}
-
 	for _, r := range value {
 		if !(r >= 'a' && r <= 'z') && !(r >= 'A' && r <= 'Z') && !(r >= '0' && r <= '9') && r != '_' && r != '-' && r != '.' {
 			return false
@@ -642,9 +611,24 @@ func isValidMongoIdentifier(value string) bool {
 	return true
 }
 
+func decodeRequestBody(r *http.Request) (any, error) {
+	if r.Body == nil {
+		return nil, nil
+	}
+	defer r.Body.Close()
+	var payload any
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&payload); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return payload, nil
+}
+
 func sanitizeDocument(input any) map[string]any {
 	output := make(map[string]any)
-
 	switch value := input.(type) {
 	case bson.M:
 		for key, v := range value {
@@ -660,7 +644,6 @@ func sanitizeDocument(input any) map[string]any {
 			_ = bson.Unmarshal(encoded, &output)
 		}
 	}
-
 	if _, ok := output["_id"]; ok {
 		switch oid := output["_id"].(type) {
 		case primitive.ObjectID:
@@ -672,7 +655,6 @@ func sanitizeDocument(input any) map[string]any {
 		}
 		delete(output, "_id")
 	}
-
 	return output
 }
 
@@ -700,9 +682,53 @@ func hasMongoOperator(value map[string]any) bool {
 	return false
 }
 
+func extractID(value map[string]any) (string, bool) {
+	if value == nil {
+		return "", false
+	}
+	for _, key := range []string{"id", "_id"} {
+		if raw, ok := value[key]; ok {
+			if id := normalizeInsertedID(raw); id != "" {
+				return id, true
+			}
+		}
+	}
+	return "", false
+}
+
+func normalizeInsertedID(value any) string {
+	switch id := value.(type) {
+	case primitive.ObjectID:
+		return id.Hex()
+	case string:
+		return id
+	case []byte:
+		return string(id)
+	default:
+		if id == nil {
+			return ""
+		}
+		return fmt.Sprintf("%v", id)
+	}
+}
+
+func normalizeObjectID(value string) any {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return trimmed
+	}
+	if oid, err := primitive.ObjectIDFromHex(trimmed); err == nil {
+		return oid
+	}
+	return trimmed
+}
+
 func writeJSON(w http.ResponseWriter, status int, payload any) {
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(payload); err != nil {
 		log.Printf("write response: %v", err)
 	}
 }
+
+var _ routines.Routine = (*HTTPServer)(nil)
