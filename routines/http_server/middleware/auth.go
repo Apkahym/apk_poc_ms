@@ -31,9 +31,20 @@ func (a *APIKeyAuth) Get(route string) (string, error) {
 		return "", errors.New("database client unavailable")
 	}
 
-	key, err := routeKey(route)
-	if err != nil {
-		return "", err
+	key := strings.TrimSpace(route)
+	if key == "" {
+		return "", fmt.Errorf("invalid route")
+	}
+	if !strings.HasPrefix(key, "/") {
+		if !strings.Contains(key, ".") {
+			return "", fmt.Errorf("invalid route")
+		}
+	} else {
+		resolvedKey, err := routeKey(key)
+		if err != nil {
+			return "", err
+		}
+		key = resolvedKey
 	}
 
 	authDatabase := getAuthDatabaseName()

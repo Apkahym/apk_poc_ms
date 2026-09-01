@@ -10,6 +10,14 @@ func TestRouteKey(t *testing.T) {
 	if key != "render.testing" {
 		t.Fatalf("expected render.testing, got %q", key)
 	}
+
+	key, err = routeKey("/api/v1/render/testing/64bf123abc1234567890abcd")
+	if err != nil {
+		t.Fatalf("routeKey should ignore document ids: %v", err)
+	}
+	if key != "render.testing" {
+		t.Fatalf("expected render.testing for document route, got %q", key)
+	}
 }
 
 func TestGetAuthDatabaseNameDefaultsToAuth(t *testing.T) {
