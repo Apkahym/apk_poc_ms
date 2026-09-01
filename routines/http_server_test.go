@@ -32,3 +32,19 @@ func TestParseDatabaseCollectionPath(t *testing.T) {
 		t.Fatalf("unexpected parsed values: db=%s collection=%s id=%s", databaseName, collectionName, documentID)
 	}
 }
+
+func TestParseDatabaseCollectionPath_Invalid(t *testing.T) {
+	invalidPaths := []string{
+		"/api/v1/users",
+		"/v1/testdb/users",
+		"/api/testdb/users",
+		"/api/v1//users",
+		"/api/v1/testdb/users/64bf123abc1234567890abcd/extra",
+	}
+
+	for _, rawPath := range invalidPaths {
+		if _, _, _, err := parseDatabaseCollectionPath(rawPath); err == nil {
+			t.Fatalf("expected invalid route for %s", rawPath)
+		}
+	}
+}

@@ -17,7 +17,6 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 type HTTPServer struct {
@@ -127,7 +126,7 @@ func (s *HTTPServer) handleAPI(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		s.handlePost(w, r, collection)
 	case http.MethodPut:
-		s.handlePut(w, r, collection)
+		s.handlePut(w, r, collection, documentID)
 	case http.MethodPatch:
 		s.handlePatch(w, r, collection, documentID)
 	case http.MethodDelete:
@@ -199,7 +198,7 @@ func (s *HTTPServer) handlePost(w http.ResponseWriter, r *http.Request, collecti
 	writeJSON(w, http.StatusOK, map[string]any{"data": payload, "count": len(payload)})
 }
 
-func (s *HTTPServer) handlePut(w http.ResponseWriter, r *http.Request, collection *mongo.Collection) {
+func (s *HTTPServer) handlePut(w http.ResponseWriter, r *http.Request, collection *mongo.Collection, documentID string) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
@@ -212,6 +211,11 @@ func (s *HTTPServer) handlePut(w http.ResponseWriter, r *http.Request, collectio
 		document = map[string]any{}
 	}
 
+	if documentID != "" {
+		if _, ok := document["_id"]; !ok {
+			document["_id"] = documentID
+		}
+	}
 	if _, found := document["_id"]; !found {
 		if rawID, ok := document["id"]; ok {
 			document["_id"] = rawID
@@ -284,7 +288,7 @@ func (s *HTTPServer) handlePatch(w http.ResponseWriter, r *http.Request, collect
 		updateDoc = bson.M{"$set": updateDoc}
 	}
 
-	result, err := collection.UpdateOne(ctx, filter, updateDoc, options.Update().SetUpsert(true))
+	result, err := collection.UpdateOne(ctx, filter, updateDoc)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
@@ -357,8 +361,24 @@ func parseDatabaseCollectionPath(rawPath string) (string, string, string, error)
 	if databaseName == "" || collectionName == "" {
 		return "", "", "", fmt.Errorf("database and collection are required")
 	}
+	if !isValidMongoIdentifier(databaseName) || !isValidMongoIdentifier(collectionName) {
+		return "", "", "", fmt.Errorf("database and collection names contain invalid characters")
+	}
 
 	return databaseName, collectionName, documentID, nil
+}
+
+func isValidMongoIdentifier(value string) bool {
+	if value == "" {
+		return false
+	}
+
+	for _, r := range value {
+		if !(r >= 'a' && r <= 'z') && !(r >= 'A' && r <= 'Z') && !(r >= '0' && r <= '9') && r != '_' && r != '-' && r != '.' {
+			return false
+		}
+	}
+	return true
 }
 
 func decodeBody(r *http.Request, target *map[string]any) error {

@@ -35,5 +35,5 @@ func init() {
 		log.Fatalf("failed to ping MongoDB: %v", err)
 	}
 
-	database.Client = client
+	database.SetClient(client)
 }
