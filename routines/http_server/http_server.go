@@ -328,10 +328,6 @@ func (s *HTTPServer) handlePatch(w http.ResponseWriter, r *http.Request, collect
 		if len(results) > 0 {
 			response["data"] = results
 		}
-		if len(errorsList) > 0 {
-			writeJSON(w, http.StatusOK, response)
-			return
-		}
 		writeJSON(w, http.StatusOK, response)
 		return
 	}
@@ -364,7 +360,9 @@ func (s *HTTPServer) handleDelete(w http.ResponseWriter, r *http.Request, collec
 			writeAPIError(w, http.StatusBadRequest, "record id or filter is required", "USR400", nil)
 			return
 		}
-		result, err := collection.DeleteOne(ctxWithTimeout(r), bson.M{"_id": normalizeObjectID(documentID)})
+		ctx, cancel := ctxWithTimeout(r)
+		defer cancel()
+		result, err := collection.DeleteOne(ctx, bson.M{"_id": normalizeObjectID(documentID)})
 		if err != nil {
 			writeAPIError(w, http.StatusInternalServerError, "fail to delete record", "USR500", err)
 			return
@@ -398,7 +396,9 @@ func (s *HTTPServer) handleDelete(w http.ResponseWriter, r *http.Request, collec
 		for _, id := range ids {
 			mongoIDs = append(mongoIDs, normalizeObjectID(id))
 		}
-		result, err := collection.DeleteMany(ctxWithTimeout(r), bson.M{"_id": bson.M{"$in": mongoIDs}})
+		ctx, cancel := ctxWithTimeout(r)
+		defer cancel()
+		result, err := collection.DeleteMany(ctx, bson.M{"_id": bson.M{"$in": mongoIDs}})
 		if err != nil {
 			writeAPIError(w, http.StatusInternalServerError, "fail to delete records", "USR500", err)
 			return
@@ -414,7 +414,9 @@ func (s *HTTPServer) handleDelete(w http.ResponseWriter, r *http.Request, collec
 	}
 
 	if id, hasID := extractID(entry); hasID {
-		result, err := collection.DeleteOne(ctxWithTimeout(r), bson.M{"_id": normalizeObjectID(id)})
+		ctx, cancel := ctxWithTimeout(r)
+		defer cancel()
+		result, err := collection.DeleteOne(ctx, bson.M{"_id": normalizeObjectID(id)})
 		if err != nil {
 			writeAPIError(w, http.StatusInternalServerError, "fail to delete record", "USR500", err)
 			return
@@ -424,7 +426,9 @@ func (s *HTTPServer) handleDelete(w http.ResponseWriter, r *http.Request, collec
 	}
 	if rawFilter, ok := entry["filter"]; ok {
 		filter := toBSONMap(rawFilter)
-		result, err := collection.DeleteMany(ctxWithTimeout(r), filter)
+		ctx, cancel := ctxWithTimeout(r)
+		defer cancel()
+		result, err := collection.DeleteMany(ctx, filter)
 		if err != nil {
 			writeAPIError(w, http.StatusInternalServerError, "fail to delete records", "USR500", err)
 			return
@@ -434,7 +438,9 @@ func (s *HTTPServer) handleDelete(w http.ResponseWriter, r *http.Request, collec
 	}
 
 	filter := toBSONMap(entry)
-	result, err := collection.DeleteMany(ctxWithTimeout(r), filter)
+	ctx, cancel := ctxWithTimeout(r)
+	defer cancel()
+	result, err := collection.DeleteMany(ctx, filter)
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "fail to delete records", "USR500", err)
 		return
@@ -442,10 +448,8 @@ func (s *HTTPServer) handleDelete(w http.ResponseWriter, r *http.Request, collec
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": result.DeletedCount, "count": result.DeletedCount})
 }
 
-func ctxWithTimeout(r *http.Request) context.Context {
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	_ = cancel
-	return ctx
+func ctxWithTimeout(r *http.Request) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(r.Context(), 10*time.Second)
 }
 
 func applyPatchOperation(ctx context.Context, collection *mongo.Collection, documentID string, payload map[string]any) (map[string]any, error) {

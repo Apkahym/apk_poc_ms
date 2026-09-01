@@ -80,7 +80,7 @@ func (a *APIKeyAuth) ensureMissingAuthKey(ctx context.Context, collection *mongo
 func (a *APIKeyAuth) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL == nil {
-			log.Printf("auth_invalid_request no_url path=%q", r.URL)
+			log.Printf("auth_invalid_request no_url request_uri=%q", r.RequestURI)
 			writeAuthError(w, http.StatusUnauthorized, "unauthorized", "USR401")
 			return
 		}
@@ -108,7 +108,7 @@ func (a *APIKeyAuth) Middleware(next http.Handler) http.Handler {
 			return
 		}
 		if storedKey == "key-not-found" || storedKey != apiKey {
-			log.Printf("auth_denied route_key=%s configured_key=%q request_key=%q database=%s collection=%s", routeKey, storedKey, apiKey, getAuthDatabaseName(), "api_keys")
+			log.Printf("auth_denied route_key=%s database=%s collection=%s request_key_present=%t stored_key_present=%t", routeKey, getAuthDatabaseName(), "api_keys", apiKey != "", storedKey != "")
 			writeAuthError(w, http.StatusUnauthorized, "unauthorized", "USR401")
 			return
 		}
