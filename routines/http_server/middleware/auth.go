@@ -15,7 +15,7 @@ import (
 	"go.mongodb.org/mongo-driver/mongo"
 )
 
-const defaultAuthDB = "admin"
+const defaultAuthDB = "auth"
 
 // APIKeyAuth checks the X-API-Key header against the value stored in MongoDB.
 type APIKeyAuth struct {
@@ -44,15 +44,11 @@ func (a *APIKeyAuth) Get(route string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	var document bson.M
 	collection := a.client.Database(authDatabase).Collection("api_keys")
+	var document bson.M
 	if err := collection.FindOne(ctx, bson.M{"key": key}).Decode(&document); err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
-			_, insertErr := collection.InsertOne(ctx, bson.M{
-				"key":   key,
-				"value": "key-not-found",
-			})
-			if insertErr != nil {
+			if insertErr := a.ensureMissingAuthKey(ctx, collection, key); insertErr != nil {
 				return "", insertErr
 			}
 			return "key-not-found", nil
@@ -61,10 +57,20 @@ func (a *APIKeyAuth) Get(route string) (string, error) {
 	}
 
 	value, _ := document["value"].(string)
-	if value == "" {
+	if value == "" || value == "key-not-found" {
 		return "key-not-found", nil
 	}
 	return value, nil
+}
+
+func (a *APIKeyAuth) ensureMissingAuthKey(ctx context.Context, collection *mongo.Collection, key string) error {
+	if _, err := collection.InsertOne(ctx, bson.M{
+		"key":   key,
+		"value": "key-not-found",
+	}); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (a *APIKeyAuth) Middleware(next http.Handler) http.Handler {
