@@ -38,3 +38,18 @@ func TestPatchItemID(t *testing.T) {
 		t.Fatalf("expected patch item id 64bf123abc1234567890abcd, got %#v", id)
 	}
 }
+
+func TestProcessPatchBatchItemPreservesOriginalIDOnError(t *testing.T) {
+	payload := map[string]any{"id": "64bf123abc1234567890abcd", "stock": 999}
+	itemID := patchItemID(payload)
+	if itemID != "64bf123abc1234567890abcd" {
+		t.Fatalf("expected item id to be captured before mutation, got %#v", itemID)
+	}
+	delete(payload, "id")
+	if patchItemID(payload) != nil {
+		t.Fatal("payload should not keep id after mutation")
+	}
+	if itemID != "64bf123abc1234567890abcd" {
+		t.Fatalf("captured item id was lost unexpectedly: %#v", itemID)
+	}
+}

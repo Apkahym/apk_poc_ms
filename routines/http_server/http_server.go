@@ -314,9 +314,9 @@ func (s *HTTPServer) handlePatch(w http.ResponseWriter, r *http.Request, collect
 				errorsList = append(errorsList, map[string]any{"id": nil, "error": "batch items must be objects"})
 				continue
 			}
-			result, err := applyPatchOperation(ctx, collection, documentID, entry)
-			if err != nil {
-				errorsList = append(errorsList, map[string]any{"id": patchItemID(entry), "error": normalizePatchError(err)})
+			result, itemError := processPatchBatchItem(ctx, collection, documentID, entry)
+			if itemError != nil {
+				errorsList = append(errorsList, itemError)
 				continue
 			}
 			results = append(results, result)
@@ -495,6 +495,15 @@ func applyPatchOperation(ctx context.Context, collection *mongo.Collection, docu
 		return nil, err
 	}
 	return sanitizeDocument(doc), nil
+}
+
+func processPatchBatchItem(ctx context.Context, collection *mongo.Collection, documentID string, entry map[string]any) (map[string]any, map[string]any) {
+	itemID := patchItemID(entry)
+	result, err := applyPatchOperation(ctx, collection, documentID, entry)
+	if err != nil {
+		return nil, map[string]any{"id": itemID, "error": normalizePatchError(err)}
+	}
+	return result, nil
 }
 
 func patchItemID(payload map[string]any) any {
